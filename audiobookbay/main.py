@@ -1,40 +1,28 @@
-import os
 import logging
-import re
-from dotenv import load_dotenv
-from urllib.parse import quote
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters, ConversationHandler
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters, ConversationHandler
+from urllib.parse import quote
 from pymongo import MongoClient
+import re
 from audiobookbay.search import search_audiobookbay
 from magnet_scraper import get_magnet_data
 
-# --- Load Env ---
-load_dotenv()
+# --- Configuration ---
+TOKEN = "7619737426:AAHcEJCe0fpjwspsFpSxFNp5Ia7ZPuXiV5Q"
+LOG_CHANNEL = -1002540698852
+REQUEST_GROUP = -1002765985373  # Replace with your actual request group chat ID
+ADMINS = [6187973258]
 
-# --- Config ---
-TOKEN = os.getenv("BOT_TOKEN")
-LOG_CHANNEL = int(os.getenv("LOG_CHANNEL"))
-REQUEST_GROUP = int(os.getenv("REQUEST_GROUP"))
-ADMINS = list(map(int, os.getenv("ADMINS").split(',')))
-MONGO_URI = os.getenv("MONGO_URI")
-
-# --- DB Setup ---
-client = MongoClient(MONGO_URI)
+# --- MongoDB ---
+client = MongoClient("mongodb+srv://mehbub64:OFhO4sqvM0X6Njl8@cluster0.q1zklvf.mongodb.net/?retryWrites=true&w=majority")
 db = client.audiobookbot
 users_collection = db.users
 custom_responses = db.custom_responses
 extra_links_collection = db.extra_links
 settings = db.settings
 
-# --- Logging ---
-logging.basicConfig(level=logging.INFO)
-
-# --- State Management ---
 user_states = {}
+logging.basicConfig(level=logging.INFO)
 
 # --- Helpers ---
 def is_admin(user_id):
@@ -56,7 +44,81 @@ async def log_to_channel(text, context):
     except Exception as e:
         logging.warning(f"Failed to send log message: {e}")
 
-# --- Commands ---
+
+# --- Welcome Command ---
+WELCOME_MSG, = range(1)
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    total_users = users_collection.count_documents({})
+    await update.message.reply_text(f"👥 Total users: {total_users}")
+
+
+async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.message.from_user.id):
+        return
+    await update.message.reply_text("📝 Send the new welcome message:")
+    return WELCOME_MSG
+
+async def save_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    settings.update_one({"name": "welcome"}, {"$set": {"message": update.message.text}}, upsert=True)
+    await update.message.reply_text("✅ Welcome message updated.")
+    return ConversationHandler.END
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    if is_admin(user_id):
+        help_text = (
+            "🛠️ <b>Admin Commands:</b>\n\n"
+            "/start - Show welcome message\n"
+            "/stats - Show total user count\n"
+            "/broadcast &lt;message&gt; - Send message to all users\n"
+            "/send &lt;user_id|username&gt; &lt;message&gt; - Send private message\n"
+            "/welcome - Set custom welcome message\n"
+            "/custom - Add custom response to keywords\n"
+            "/attach 'Text' &lt;link&gt; - Attach extra link\n"
+            "/remove &lt;text&gt; - Remove attached link\n"
+            "/link - Show all attached links\n"
+            "/cancel - Cancel current operation\n"
+        )
+    else:
+        help_text = (
+            "🤖 <b>User Commands:</b>\n\n"
+            "/start - Show welcome message\n"
+            "Type a book name to search audiobooks\n"
+            "Use /request &lt;book&gt; to request an audiobook\n"
+        )
+
+    await update.message.reply_text(help_text, parse_mode='HTML')
+
+
+
+# --- Custom Keyword Command ---
+CUSTOM_KEYWORD, CUSTOM_RESPONSE = range(2)
+
+async def custom(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.message.from_user.id):
+        return
+    await update.message.reply_text("🔑 Send the keyword to set:")
+    return CUSTOM_KEYWORD
+
+async def get_custom_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["keyword"] = update.message.text.lower()
+    await update.message.reply_text("💬 Now send the custom response for this keyword:")
+    return CUSTOM_RESPONSE
+
+async def save_custom_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyword = context.user_data["keyword"]
+    response = update.message.text
+    custom_responses.update_one({"keyword": keyword}, {"$set": {"response": response}}, upsert=True)
+    await update.message.reply_text(f"✅ Custom response for keyword '{keyword}' saved.")
+    return ConversationHandler.END
+
+# --- Cancel Handler ---
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Operation cancelled.")
+    return ConversationHandler.END
+
+# --- Bot Commands ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = settings.find_one({"name": "welcome"})
     welcome_message = doc["message"] if doc else (
@@ -67,34 +129,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(welcome_message)
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    total_users = users_collection.count_documents({})
-    await update.message.reply_text(f"👥 Total users: {total_users}")
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if is_admin(user_id):
-        help_text = (
-            "🛠️ <b>Admin Commands:</b>\n\n"
-            "/start - Show welcome message\n"
-            "/stats - Show total user count\n"
-            "/broadcast <message> - Send message to all users\n"
-            "/send <user_id|username> <message> - Send private message\n"
-            "/welcome - Set custom welcome message\n"
-            "/custom - Add custom response to keywords\n"
-            "/attach 'Text' <link> - Attach extra link\n"
-            "/remove <text> - Remove attached link\n"
-            "/link - Show all attached links\n"
-            "/cancel - Cancel current operation\n"
-        )
-    else:
-        help_text = (
-            "🤖 <b>User Commands:</b>\n\n"
-            "/start - Show welcome message\n"
-            "Type a book name to search audiobooks\n"
-            "Use /request <book> to request an audiobook\n"
-        )
-    await update.message.reply_text(help_text, parse_mode='HTML')
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.message.from_user.id):
@@ -120,45 +154,6 @@ async def send_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await update.message.reply_text("❌ Failed to send.")
 
-# --- Welcome ---
-WELCOME_MSG, = range(1)
-async def welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.message.from_user.id):
-        return
-    await update.message.reply_text("📝 Send the new welcome message:")
-    return WELCOME_MSG
-
-async def save_welcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    settings.update_one({"name": "welcome"}, {"$set": {"message": update.message.text}}, upsert=True)
-    await update.message.reply_text("✅ Welcome message updated.")
-    return ConversationHandler.END
-
-# --- Custom Keywords ---
-CUSTOM_KEYWORD, CUSTOM_RESPONSE = range(2)
-async def custom(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.message.from_user.id):
-        return
-    await update.message.reply_text("🔑 Send the keyword to set:")
-    return CUSTOM_KEYWORD
-
-async def get_custom_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["keyword"] = update.message.text.lower()
-    await update.message.reply_text("💬 Now send the custom response for this keyword:")
-    return CUSTOM_RESPONSE
-
-async def save_custom_response(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyword = context.user_data["keyword"]
-    response = update.message.text
-    custom_responses.update_one({"keyword": keyword}, {"$set": {"response": response}}, upsert=True)
-    await update.message.reply_text(f"✅ Custom response for keyword '{keyword}' saved.")
-    return ConversationHandler.END
-
-# --- Cancel ---
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Operation cancelled.")
-    return ConversationHandler.END
-
-# --- Extra Links ---
 async def attach(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.message.from_user.id):
         return
@@ -198,9 +193,11 @@ async def list_links(update: Update, context: ContextTypes.DEFAULT_TYPE):
         link = entry.get('link', '').strip()
         if link:
             msg += f"• <b>{text}</b>: <a href=\"{link}\">{link}</a>\n"
+        else:
+            msg += f"• <b>{text}</b>: (no link)\n"
     await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
 
-# --- Message Search ---
+# --- Message Handler ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     query = update.message.text.strip()
@@ -212,8 +209,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             from_chat_id=update.effective_chat.id,
             message_id=update.message.id
         )
-        await update.message.reply_text("✅ Your request has been forwarded.")
-        return
+        await update.message.reply_text("✅ Your request has been forwarded to the admin team.")
 
     users_collection.update_one(
         {"_id": user_id},
@@ -226,11 +222,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     custom = custom_responses.find_one({"keyword": lowered})
     if custom:
-        await update.message.reply_text(custom["response"])
-        return
+        await update.message.reply_text(custom["response"])  # Send custom response
 
+# Then continue to search logic...
     user_states[user_id] = {'query': query, 'page': 1}
     results = search_audiobookbay(query, 1)
+
     if not results:
         await update.message.reply_text("No results found.")
         await context.bot.send_message(
@@ -247,7 +244,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=get_keyboard(results, 1)
     )
 
-# --- Callback ---
+
+# --- Callback Handler ---
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query_data = update.callback_query.data
     user_id = update.callback_query.from_user.id
@@ -295,10 +293,14 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not data:
             await update.callback_query.answer("No magnet found.", show_alert=True)
             return
+
         magnet = data.get("magnet_link")
         webtor = f"https://webtor.io/{quote(magnet, safe='')}"
         extra = extra_links_collection.find_one(sort=[('_id', -1)])
-        extra_button = [InlineKeyboardButton(extra['text'], url=extra['link'])] if extra else []
+
+        extra_button = []
+        if extra and extra.get("link", "").startswith(("http://", "https://")):
+            extra_button = [InlineKeyboardButton(extra['text'], url=extra['link'])]
 
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("▶️ Stream on Webtor", url=webtor)],
@@ -322,59 +324,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
 
 # --- Main ---
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stats", stats))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("broadcast", broadcast))
-    app.add_handler(CommandHandler("send", send_to_user))
-    app.add_handler(CommandHandler("attach", attach))
-    app.add_handler(CommandHandler("remove", remove))
-    app.add_handler(CommandHandler("link", list_links))
-
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("welcome", welcome)],
-        states={WELCOME_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_welcome)]},
-        fallbacks=[CommandHandler("cancel", cancel)]
-    ))
-
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("custom", custom)],
-        states={
-            CUSTOM_KEYWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_custom_response)],
-            CUSTOM_RESPONSE: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_custom_response)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
-    ))
-
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_handler(CallbackQueryHandler(handle_callback))
-
-    logging.info("Bot is running...")
-    app.run_polling()
-
-if __name__ == "__main__":
-    main()
-from aiohttp import web
-import threading
-
-# --- Health check route for Render ---
-async def health(request):
-    return web.Response(text="✅ Bot is alive")
-
-def run_health_server():
-    app = web.Application()
-    app.router.add_get("/", health)
-    web.run_app(app, port=8080)
-
-# --- Main Application Start ---
 if __name__ == '__main__':
-    # Run the web server in a background thread to keep the service alive
-    threading.Thread(target=run_health_server).start()
-
-    # Telegram bot starts here
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
@@ -404,4 +354,4 @@ if __name__ == '__main__':
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(CallbackQueryHandler(handle_callback))
 
-    app.run_polling()
+app.run_polling()
